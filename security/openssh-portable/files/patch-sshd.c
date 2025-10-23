@@ -41,28 +41,108 @@ connections, do not protect connection handlers spawned from inetd.
  #include <sys/ioctl.h>
 +#include <sys/mman.h>
  #include <sys/socket.h>
- #ifdef HAVE_SYS_STAT_H
- # include <sys/stat.h>
-@@ -69,6 +70,13 @@
+ #include <sys/stat.h>
+ #include <sys/time.h>
+@@ -63,6 +64,15 @@
  #include <prot.h>
  #endif
  
 +#ifdef __FreeBSD__
 +#include <resolv.h>
-+#ifdef GSSAPI
-+#include "ssh-gss.h"
++#if defined(GSSAPI) && defined(HAVE_GSSAPI_GSSAPI_H)
++#include <gssapi/gssapi.h>
++#elif defined(GSSAPI) && defined(HAVE_GSSAPI_H)
++#include <gssapi.h>
 +#endif
 +#endif
 +
  #include "xmalloc.h"
  #include "ssh.h"
  #include "sshpty.h"
-@@ -1671,7 +1679,30 @@ main(int ac, char **av)
- 	for (i = 0; i < options.num_log_verbose; i++)
- 		log_verbose_add(options.log_verbose[i]);
+@@ -90,6 +100,10 @@
+ #include "ssh-gss.h"
+ #endif
+ #include "monitor_wrap.h"
++#ifdef LIBWRAP
++#include <tcpd.h>
++#include <syslog.h>
++#endif /* LIBWRAP */
  
-+#ifdef __FreeBSD__
+ /* Re-exec fds */
+ #define REEXEC_DEVCRYPTO_RESERVED_FD	(STDERR_FILENO + 1)
+@@ -925,7 +939,12 @@ server_accept_loop(int *sock_in, int *sock_out, int *n
+ 	socklen_t fromlen;
+ 	u_char rnd[256];
+ 	sigset_t nsigset, osigset;
++#ifdef LIBWRAP
++	struct request_info req;
+ 
++	request_init(&req, RQ_DAEMON, __progname, 0);
++#endif
++
+ 	/* pipes connected to unauthenticated child sshd processes */
+ 	child_alloc();
+ 	startup_pollfd = xcalloc(options.max_startups, sizeof(int));
+@@ -1133,6 +1152,42 @@ server_accept_loop(int *sock_in, int *sock_out, int *n
+ 					usleep(100 * 1000);
+ 				continue;
+ 			}
++#ifdef LIBWRAP
++			/* Check whether logins are denied from this host. */
++			request_set(&req, RQ_FILE, *newsock,
++			    RQ_CLIENT_NAME, "", RQ_CLIENT_ADDR, "", 0);
++			sock_host(&req);
++			if (!hosts_access(&req)) {
++				const struct linger l = { .l_onoff = 1,
++				    .l_linger  = 0 };
++
++				(void )setsockopt(*newsock, SOL_SOCKET,
++				    SO_LINGER, &l, sizeof(l));
++				(void )close(*newsock);
++				/*
++				 * Mimic message from libwrap's refuse() as
++				 * precisely as we can afford.  The authentic
++				 * message prints the IP address and the
++				 * hostname it resolves to in parentheses.  If
++				 * the IP address cannot be resolved to a
++				 * hostname, the IP address will be repeated
++				 * in parentheses.  As name resolution in the
++				 * main server loop could stall, and logging
++				 * resolved names adds little or no value to
++				 * incident investigation, this implementation
++				 * only repeats the IP address in parentheses.
++				 * This should resemble librwap's refuse()
++				 * closely enough not to break auditing
++				 * software like sshguard or custom scripts.
++				 */
++				syslog(LOG_WARNING,
++				    "refused connect from %s (%s)",
++				    eval_hostaddr(req.client),
++				    eval_hostaddr(req.client));
++				debug("Connection refused by tcp wrapper");
++				continue;
++			}
++#endif /* LIBWRAP */
+ 			if (unset_nonblock(*newsock) == -1) {
+ 				close(*newsock);
+ 				continue;
+@@ -1825,6 +1880,10 @@ main(int ac, char **av)
+ 	/* Reinitialize the log (because of the fork above). */
+ 	log_init(__progname, options.log_level, options.log_facility, log_stderr);
+ 
++ 	/* Avoid killing the process in high-pressure swapping environments. */
++ 	if (!inetd_flag && madvise(NULL, 0, MADV_PROTECT) != 0)
++ 		debug("madvise(): %.200s", strerror(errno));
++
  	/*
+ 	 * Chdir to the root directory so that the current disk can be
+ 	 * unmounted if desired.
+@@ -1910,6 +1969,28 @@ main(int ac, char **av)
+ 	execv(rexec_argv[0], rexec_argv);
+ 
+ 	fatal("rexec of %s failed: %s", rexec_argv[0], strerror(errno));
++#ifdef __FreeBSD__
++	/*
 +	 * Initialize the resolver.  This may not happen automatically
 +	 * before privsep chroot().
 +	 */
@@ -83,19 +163,6 @@ connections, do not protect connection handlers spawned from inetd.
 +	}
 +#endif
 +#endif
-+
-+	/*
- 	 * If not in debugging mode, not started from inetd and not already
- 	 * daemonized (eg re-exec via SIGHUP), disconnect from the controlling
- 	 * terminal, and fork.  The original process exits.
-@@ -1687,6 +1718,10 @@ main(int ac, char **av)
- 	/* Reinitialize the log (because of the fork above). */
- 	log_init(__progname, options.log_level, options.log_facility, log_stderr);
+ }
  
-+ 	/* Avoid killing the process in high-pressure swapping environments. */
-+ 	if (!inetd_flag && madvise(NULL, 0, MADV_PROTECT) != 0)
-+ 		debug("madvise(): %.200s", strerror(errno));
-+
- 	/*
- 	 * Chdir to the root directory so that the current disk can be
- 	 * unmounted if desired.
+ /* server specific fatal cleanup */
