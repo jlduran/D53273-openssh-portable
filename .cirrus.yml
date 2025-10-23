@@ -1,0 +1,17 @@
+poudriere_task:
+  freebsd_instance:
+    image_family: freebsd-14-3
+
+  install_prerequisites_script:
+    - pkg install -y git poudriere-devel
+
+  poudriere_jail_script:
+    - poudriere jail -c -j 14-3-RELEASE -v 14.3-RELEASE
+
+  poudriere_ports_script:
+    - poudriere ports -c -U https://git.freebsd.org/ports.git -B main -p latest
+    - poudriere ports -c -M $CIRRUS_WORKING_DIR -m null -p overlay
+
+  poudriere_bulk_script:
+    - mkdir -p /usr/ports/distfiles
+    - poudriere bulk -j 14-3-RELEASE -b latest -p latest -O overlay -f pkglist
